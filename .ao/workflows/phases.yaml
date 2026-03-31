@@ -1,0 +1,292 @@
+phases:
+  fetch-incidents:
+    mode: command
+    command:
+      program: bash
+      args:
+        - "-c"
+        - |
+          set -e
+          REPO=$(grep 'target_repo:' config/settings.yaml | awk '{print $2}' | tr -d '"')
+          LABELS=$(grep -A 10 'incident_labels:' config/settings.yaml | grep '  -' | awk '{print $2}' | tr '\n' ',' | sed 's/,$//')
+          echo "Fetching incidents from $REPO with labels: $LABELS"
+          mkdir -p data
+          gh issue list \
+            --repo "$REPO" \
+            --label "$(echo $LABELS | tr ',' '\n' | head -1)" \
+            --state all \
+            --limit 200 \
+            --json number,title,body,labels,createdAt,closedAt,state,comments,author \
+            > data/raw-incidents.json 2>/dev/null || echo "[]" > data/raw-incidents.json
+          # Also try other common incident labels
+          for label in incident outage postmortem sev1 sev2; do
+            gh issue list \
+              --repo "$REPO" \
+              --label "$label" \
+              --state all \
+              --limit 100 \
+              --json number,title,body,labels,createdAt,closedAt,state,comments,author \
+              >> data/raw-incidents-extra.json 2>/dev/null || true
+          done
+          # Merge and deduplicate by issue number
+          python3 -c "
+          import json, os
+          main = json.load(open('data/raw-incidents.json')) if os.path.exists('data/raw-incidents.json') else []
+          extra = []
+          if os.path.exists('data/raw-incidents-extra.json'):
+              try:
+                  with open('data/raw-incidents-extra.json') as f:
+                      content = f.read().strip()
+                  # Handle concatenated JSON arrays
+                  extra = json.loads('[' + content.replace('][', '],[') + ']')
+                  extra = [item for sublist in extra for item in sublist] if isinstance(extra[0], list) else extra
+              except:
+                  pass
+          all_issues = {i['number']: i for i in main + extra}
+          result = list(all_issues.values())
+          result.sort(key=lambda x: x['number'], reverse=True)
+          json.dump(result, open('data/raw-incidents.json', 'w'), indent=2)
+          print(f'Fetched {len(result)} incidents')
+          " || echo "Merge step skipped"
+          wc -c data/raw-incidents.json
+      cwd_mode: project_root
+      timeout_secs: 120
+    capabilities:
+      writes_files: true
+
+  analyze-patterns:
+    mode: agent
+    agent: incident-analyst
+    directive: |
+      Read data/raw-incidents.json and analyze the incident data.
+
+      Extract and write data/incident-analysis.json with this structure:
+      {
+        "services": ["list of unique service names mentioned in incidents"],
+        "patterns": [
+          {
+            "id": "pattern-001",
+            "name": "Human-readable pattern name",
+            "service": "service-name",
+            "severity": "P1|P2|P3|P4",
+            "frequency": 5,
+            "incidents": ["#42", "#87"],
+            "root_cause": "Brief technical root cause description",
+            "symptoms": ["observable symptom 1", "observable symptom 2"],
+            "resolution_summary": "What was done to fix it"
+          }
+        ],
+        "coverage_gaps": ["service X has N P1 incidents but no runbook"],
+        "stats": {
+          "total_incidents": 47,
+          "p1": 5,
+          "p2": 12,
+          "p3": 20,
+          "p4": 10,
+          "services_affected": 4
+        }
+      }
+
+      Group incidents by shared root cause or symptom signature. Use sequential-thinking
+      to reason through ambiguous patterns before writing the output.
+
+      If data/raw-incidents.json is empty or contains fewer than 3 incidents, also check
+      sample-data/sample-incidents.json and use that as the incident corpus instead.
+
+      After writing data/incident-analysis.json, print a summary of patterns found.
+    capabilities:
+      writes_files: true
+
+  prioritize-runbooks:
+    mode: agent
+    agent: incident-analyst
+    directive: |
+      Read data/incident-analysis.json and decide which runbooks to generate.
+
+      Apply these priority rules:
+      1. P1 patterns with no existing runbook → priority: high
+      2. Recurring patterns (frequency >= 3) regardless of severity → priority: high
+      3. Services with zero runbook coverage and any P2+ incident → priority: medium
+      4. Skip patterns with frequency < 2 unless P1
+
+      Check output/runbooks/ directory to see which runbooks already exist. A runbook
+      exists if there's a file matching <service>-<pattern-slug>.md.
+
+      Write data/runbook-queue.json with this structure:
+      {
+        "generated_at": "ISO timestamp",
+        "runbooks_to_generate": [
+          {
+            "id": "pattern-001",
+            "filename": "api-gateway-connection-pool-exhaustion.md",
+            "service": "api-gateway",
+            "pattern_name": "Connection Pool Exhaustion",
+            "severity": "P1",
+            "priority": "high",
+            "incident_refs": ["#42", "#87"],
+            "reason": "P1 pattern with 5 occurrences, no existing runbook"
+          }
+        ],
+        "skipped": [
+          {
+            "id": "pattern-005",
+            "reason": "Only 1 incident, severity P4"
+          }
+        ]
+      }
+    decision_contract:
+      required_fields:
+        - verdict
+        - reasoning
+        - runbooks_to_generate
+    capabilities:
+      writes_files: true
+
+  write-runbooks:
+    mode: agent
+    agent: procedure-writer
+    directive: |
+      Read data/runbook-queue.json to get the list of runbooks to generate.
+      Read data/incident-analysis.json to get the full pattern details including symptoms
+      and resolution summaries.
+      Read templates/runbook-template.md for the required formatting.
+
+      For each entry in runbooks_to_generate, create output/runbooks/<filename> with a
+      complete operational runbook. The runbook must include:
+
+      1. Header with service, severity, date (use today's date: {{subject_description}} or
+         format as YYYY-MM-DD), and owner (SRE Team)
+      2. Symptoms section with specific observable signals (alert names, error patterns,
+         dashboard indicators) — derive from incident symptoms in the analysis
+      3. Diagnostic steps with exact, runnable CLI commands and what each checks
+         - Include kubectl, psql, redis-cli, curl, or service-specific tools as appropriate
+         - Each command must have a one-line explanation
+      4. Remediation with two tracks: quick restore and root cause fix
+      5. Escalation path with time thresholds
+      6. Rollback plan
+      7. Related incidents with issue numbers from the pattern's incident_refs
+      8. Prevention recommendations
+
+      Use sequential-thinking to reason through the diagnostic sequence for each pattern
+      before writing the runbook — the diagnostic steps must be in the right order
+      (confirm symptoms → isolate component → gather context → take action).
+
+      Create output/runbooks/ directory if it doesn't exist.
+      Print the filename of each runbook after writing it.
+    capabilities:
+      writes_files: true
+
+  review-runbooks:
+    mode: agent
+    agent: runbook-reviewer
+    directive: |
+      Review all runbook files in output/runbooks/ for quality and completeness.
+
+      For each runbook, check:
+      1. All required sections are present (symptoms, diagnostics, remediation,
+         escalation, rollback, related incidents)
+      2. CLI commands are syntactically correct — kubectl, psql, redis-cli commands
+         should have realistic syntax. Flag commands with obvious errors.
+      3. Steps are specific and actionable — no vague instructions. A junior SRE
+         must be able to follow each step without guessing.
+      4. Destructive commands (kubectl delete, DROP TABLE, FLUSHALL) have explicit
+         WARNING notices before them.
+      5. Severity labels use P1/P2/P3/P4 convention consistently.
+      6. Each runbook links back to at least one GitHub issue number.
+
+      Write data/review-results.json with your findings.
+
+      Decide:
+      - "approve" if ALL runbooks pass all criteria (or only have minor warnings)
+      - "rework" if any runbook is missing required sections, has vague steps, or has
+        command syntax errors — include specific issues per file in the issues array
+      - "reject" only if a runbook is based on incorrect incident data or is fundamentally
+        misleading (extremely rare)
+
+      Use sequential-thinking to systematically check each criterion for each runbook.
+    decision_contract:
+      required_fields:
+        - verdict
+        - reasoning
+        - issues
+    capabilities:
+      writes_files: true
+
+  publish-to-wiki:
+    mode: agent
+    agent: wiki-publisher
+    directive: |
+      Publish all approved runbooks in output/runbooks/ to the GitHub repository wiki.
+
+      Read config/settings.yaml to get the target_repo (e.g., "myorg/myapp").
+
+      Publishing steps:
+      1. Clone the wiki repo:
+         git clone https://github.com/<target_repo>.wiki.git /tmp/wiki-work
+      2. Copy each runbook from output/runbooks/ into the wiki directory
+         - Convert filename from kebab-case to Title-Case for the wiki page name
+         - Example: api-gateway-connection-pool-exhaustion.md → Api-Gateway-Connection-Pool-Exhaustion.md
+      3. Update or create Home.md with a table of contents listing all runbooks:
+         | Service | Pattern | Severity | Updated |
+         grouped by service, linked to their wiki pages
+      4. Commit with message: "chore(runbooks): auto-update runbooks [<date>]"
+      5. Push to the wiki remote
+
+      If wiki cloning fails (repo doesn't have a wiki yet), initialize it:
+         mkdir -p /tmp/wiki-work && cd /tmp/wiki-work && git init
+         git remote add origin https://github.com/<target_repo>.wiki.git
+
+      Use gh CLI for authentication. The GITHUB_TOKEN environment variable should be
+      available for gh operations.
+
+      Print a confirmation for each published runbook.
+    capabilities:
+      mutates_state: true
+      writes_files: true
+
+  coverage-report:
+    mode: agent
+    agent: wiki-publisher
+    directive: |
+      Generate a runbook coverage report based on the incident analysis and published runbooks.
+
+      Read data/incident-analysis.json for the full service and incident picture.
+      List files in output/runbooks/ to see which runbooks now exist.
+
+      Calculate:
+      1. Coverage per service: count runbooks vs total distinct patterns per service
+      2. Severity coverage: are all P1 patterns covered? P2?
+      3. Overall coverage percentage: covered_patterns / total_patterns * 100
+      4. Staleness: runbooks with a "Last Updated" date > 30 days ago
+      5. Next batch recommendations: top 5 highest-priority uncovered patterns
+
+      Write output/coverage-report.md as a human-readable markdown document with:
+      - Executive summary (1 paragraph)
+      - Coverage table by service
+      - P1/P2 gap list (if any)
+      - Staleness warnings
+      - Recommendations section
+
+      Write output/coverage-summary.json as:
+      {
+        "generated_at": "ISO timestamp",
+        "overall_coverage_pct": 75.0,
+        "total_patterns": 12,
+        "covered_patterns": 9,
+        "p1_coverage_pct": 100.0,
+        "services": [
+          {
+            "name": "api-gateway",
+            "total_patterns": 3,
+            "covered": 2,
+            "coverage_pct": 66.7,
+            "p1_covered": true
+          }
+        ],
+        "recommendations": ["Generate runbooks for auth-service P2 patterns"]
+      }
+
+      Print the final coverage percentage and any critical gaps.
+    capabilities:
+      writes_files: true
+      requires_commit: true

@@ -1,0 +1,33 @@
+# Runbook Generator Configuration
+# Update target_repo to point at the GitHub repo where incidents are tracked
+
+target_repo: "myorg/myapp"
+
+incident_labels:
+  - incident
+  - outage
+  - postmortem
+  - sev1
+  - sev2
+
+severity_mapping:
+  sev1: P1
+  sev2: P2
+  incident: P2
+  outage: P1
+  postmortem: P2
+
+services:
+  - api-gateway
+  - auth-service
+  - database
+  - worker
+  - cdn
+
+wiki_prefix: "Runbook"
+
+# Minimum coverage threshold to pass the coverage check (percentage)
+coverage_threshold: 80
+
+# Runbooks older than this many days are flagged as potentially stale
+staleness_days: 30

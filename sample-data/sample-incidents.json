@@ -1,0 +1,168 @@
+[
+  {
+    "number": 142,
+    "title": "[P1] api-gateway: 503 storm after deploy v2.4.1",
+    "body": "## Incident Report\n\n**Severity:** P1\n**Service:** api-gateway\n**Duration:** 47 minutes\n\n### What happened\nAfter deploying v2.4.1 at 14:32 UTC, error rate spiked to 23%. All pods entered CrashLoopBackOff within 2 minutes.\n\n### Root cause\nNew connection pool config in v2.4.1 set max_connections=5 instead of 50 — typo in the Helm values file. Under normal traffic, pool exhausted within 90 seconds.\n\n### Resolution\nRolled back to v2.4.0 at 15:19 UTC. Error rate returned to baseline within 3 minutes.\n\n### Timeline\n- 14:32 Deploy v2.4.1\n- 14:34 PagerDuty alert fires (api_error_rate > 5%)\n- 14:38 On-call engineer joins\n- 14:45 Root cause identified (connection pool config)\n- 15:19 Rollback to v2.4.0 complete\n- 15:22 Incident resolved",
+    "labels": [
+      {"name": "incident"},
+      {"name": "outage"},
+      {"name": "sev1"},
+      {"name": "api-gateway"}
+    ],
+    "createdAt": "2026-03-20T14:34:00Z",
+    "closedAt": "2026-03-20T15:30:00Z",
+    "state": "CLOSED",
+    "author": {"login": "alice-sre"},
+    "comments": [
+      {
+        "body": "Rollback complete. Monitoring for 10 minutes before closing.",
+        "author": {"login": "alice-sre"},
+        "createdAt": "2026-03-20T15:20:00Z"
+      }
+    ]
+  },
+  {
+    "number": 138,
+    "title": "[P1] api-gateway: connection pool exhaustion during traffic spike",
+    "body": "## Incident\n**Service:** api-gateway\n**Severity:** P1\n**Duration:** 32 minutes\n\n### What happened\nBlack Friday traffic spike (3x normal) hit api-gateway at 09:00 UTC. Connection pool (max=50) exhausted in 4 minutes. New requests queued then timed out, producing 503s for ~30% of users.\n\n### Resolution\nEmergency config patch to increase pool size to 200. Deployed via kubectl set env. Service recovered in 8 minutes.\n\n### Root cause\nDefault connection pool size is not validated against expected peak traffic. No autoscaling configured for api-gateway.",
+    "labels": [
+      {"name": "incident"},
+      {"name": "sev1"},
+      {"name": "api-gateway"},
+      {"name": "capacity"}
+    ],
+    "createdAt": "2026-02-28T09:04:00Z",
+    "closedAt": "2026-02-28T09:36:00Z",
+    "state": "CLOSED",
+    "author": {"login": "bob-sre"},
+    "comments": []
+  },
+  {
+    "number": 125,
+    "title": "[P1] api-gateway: cascading failure from upstream timeout",
+    "body": "## Incident\n**Severity:** P1\n**Service:** api-gateway (and downstream auth-service)\n**Duration:** 1h 15m\n\n### What happened\nauth-service database had a long-running migration query that caused auth-service to respond in >10s. api-gateway's timeout is set to 30s (too generous). Under load, all 200 connection pool slots were occupied waiting for auth-service responses. New requests queued until pool exhausted.\n\n### Resolution\n1. Killed the long-running migration query on the database\n2. Set auth-service timeout to 3s in api-gateway config\n3. Restarted api-gateway to clear stuck connections\n\n### Root cause\nNo circuit breaker between api-gateway and auth-service. Timeout too long. Migration ran during peak hours.",
+    "labels": [
+      {"name": "incident"},
+      {"name": "outage"},
+      {"name": "sev1"},
+      {"name": "api-gateway"},
+      {"name": "auth-service"}
+    ],
+    "createdAt": "2026-01-15T11:20:00Z",
+    "closedAt": "2026-01-15T12:35:00Z",
+    "state": "CLOSED",
+    "author": {"login": "carol-sre"},
+    "comments": [
+      {
+        "body": "Post-mortem scheduled for Monday. Action items: circuit breaker implementation, migration runbook.",
+        "author": {"login": "carol-sre"},
+        "createdAt": "2026-01-15T13:00:00Z"
+      }
+    ]
+  },
+  {
+    "number": 119,
+    "title": "[P2] auth-service: JWT signing key rotation broke all sessions",
+    "body": "## Incident\n**Severity:** P2 (auth failures, no data loss)\n**Service:** auth-service\n**Duration:** 22 minutes\n\n### What happened\nQuarterly JWT signing key rotation was performed manually. New key was added but old key was immediately removed. All active sessions signed with the old key became invalid. Users were logged out globally.\n\n### Resolution\nRestored old signing key alongside new key. Added old key to verification chain. Users had to log in once more.\n\n### Root cause\nKey rotation runbook doesn't include a grace period for old key. Should keep old key for session TTL (7 days) before removing.",
+    "labels": [
+      {"name": "incident"},
+      {"name": "sev2"},
+      {"name": "auth-service"}
+    ],
+    "createdAt": "2026-01-08T14:00:00Z",
+    "closedAt": "2026-01-08T14:22:00Z",
+    "state": "CLOSED",
+    "author": {"login": "alice-sre"},
+    "comments": []
+  },
+  {
+    "number": 103,
+    "title": "[P2] database: connection pool exhaustion under high concurrency",
+    "body": "## Incident\n**Severity:** P2\n**Service:** database (postgres-primary)\n**Duration:** 45 minutes\n\n### What happened\nORM connection leak introduced in feature branch merged 2 days ago. Under concurrent request load (>200 rps), connections were not returned to pool after goroutine panics. Pool exhausted, new requests queued indefinitely.\n\n### Resolution\nDeployed hotfix to close connections in defer statement. Restarted postgres-primary to clear leaked connections.\n\n### Root cause\nConnection leak: goroutine panic in ORM middleware skipped the connection.Close() call.",
+    "labels": [
+      {"name": "incident"},
+      {"name": "sev2"},
+      {"name": "database"}
+    ],
+    "createdAt": "2025-12-10T16:00:00Z",
+    "closedAt": "2025-12-10T16:45:00Z",
+    "state": "CLOSED",
+    "author": {"login": "bob-sre"},
+    "comments": []
+  },
+  {
+    "number": 95,
+    "title": "[P2] database: slow query caused cascade of timeouts",
+    "body": "## Incident\n**Severity:** P2\n**Service:** database\n**Duration:** 38 minutes\n\n### What happened\nA missing index on users table caused a sequential scan on a 12M row table. Query time went from 2ms to 18s. Worker service queued 4,000 unprocessed jobs. API latency spiked to 8s p99.\n\n### Resolution\nIdentified slow query via pg_stat_activity. Added index. Query time back to 2ms. Worker cleared queue over 15 minutes.",
+    "labels": [
+      {"name": "incident"},
+      {"name": "sev2"},
+      {"name": "database"}
+    ],
+    "createdAt": "2025-11-22T10:30:00Z",
+    "closedAt": "2025-11-22T11:08:00Z",
+    "state": "CLOSED",
+    "author": {"login": "carol-sre"},
+    "comments": []
+  },
+  {
+    "number": 87,
+    "title": "[P1] api-gateway: 502 storm — connection pool exhausted after config change",
+    "body": "## Incident\n**Severity:** P1\n**Service:** api-gateway\n**Duration:** 28 minutes\n\n### What happened\nConfig change to enable new feature flag accidentally set db_pool_max=10 (was 100). Under normal traffic, pool exhausted in 3 minutes.\n\n### Resolution\nReverted config change. Service recovered.",
+    "labels": [
+      {"name": "outage"},
+      {"name": "sev1"},
+      {"name": "api-gateway"}
+    ],
+    "createdAt": "2025-10-14T08:00:00Z",
+    "closedAt": "2025-10-14T08:28:00Z",
+    "state": "CLOSED",
+    "author": {"login": "alice-sre"},
+    "comments": []
+  },
+  {
+    "number": 78,
+    "title": "[P3] worker: job queue backlog after Redis OOM",
+    "body": "## Incident\n**Severity:** P3\n**Service:** worker, redis\n**Duration:** 2 hours (backlog clearing)\n\n### What happened\nRedis ran out of memory (maxmemory not configured). New jobs were rejected with OOM error. Worker stopped accepting new tasks. Backlog of ~15,000 jobs accumulated in the database fallback queue.\n\n### Resolution\nSet maxmemory to 2GB and maxmemory-policy to allkeys-lru. Restarted Redis. Worker processed backlog over ~90 minutes.\n\n### Root cause\nRedis deployed without maxmemory setting. First time memory was exhausted in production.",
+    "labels": [
+      {"name": "incident"},
+      {"name": "worker"},
+      {"name": "redis"}
+    ],
+    "createdAt": "2025-09-05T13:00:00Z",
+    "closedAt": "2025-09-05T15:00:00Z",
+    "state": "CLOSED",
+    "author": {"login": "bob-sre"},
+    "comments": []
+  },
+  {
+    "number": 65,
+    "title": "[P2] auth-service: rate limiter misconfiguration locked out all users",
+    "body": "## Incident\n**Severity:** P2\n**Service:** auth-service\n**Duration:** 18 minutes\n\n### What happened\nRate limiter config update set global_rate_limit=1 req/min (should have been 1000/min). All login attempts rejected with 429 Too Many Requests immediately.\n\n### Resolution\nRevert rate limiter config. Deploy took 8 minutes. No data loss.",
+    "labels": [
+      {"name": "incident"},
+      {"name": "sev2"},
+      {"name": "auth-service"}
+    ],
+    "createdAt": "2025-08-12T09:30:00Z",
+    "closedAt": "2025-08-12T09:48:00Z",
+    "state": "CLOSED",
+    "author": {"login": "carol-sre"},
+    "comments": []
+  },
+  {
+    "number": 42,
+    "title": "[P1] database: connection pool exhaustion — ORM bug",
+    "body": "## Incident\n**Severity:** P1\n**Service:** database\n**Duration:** 1h 20m\n\n### What happened\nFirst occurrence of the ORM connection leak bug. Took longer to diagnose as the pattern wasn't known yet.\n\n### Resolution\nRestarted all services that use the database. Bought time for hotfix deployment.",
+    "labels": [
+      {"name": "outage"},
+      {"name": "sev1"},
+      {"name": "database"}
+    ],
+    "createdAt": "2025-07-04T02:00:00Z",
+    "closedAt": "2025-07-04T03:20:00Z",
+    "state": "CLOSED",
+    "author": {"login": "alice-sre"},
+    "comments": []
+  }
+]

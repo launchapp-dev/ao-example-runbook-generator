@@ -1,0 +1,56 @@
+default_workflow_ref: runbook-generator
+
+workflows:
+  - id: runbook-generator
+    name: "Runbook Generator"
+    description: "Full pipeline: fetch incidents, analyze patterns, write runbooks, review quality, publish to wiki"
+    phases:
+      - fetch-incidents
+      - analyze-patterns
+      - prioritize-runbooks:
+          on_verdict:
+            insufficient-data:
+              target: fetch-incidents
+          max_rework_attempts: 2
+      - write-runbooks
+      - review-runbooks:
+          on_verdict:
+            rework:
+              target: write-runbooks
+            reject:
+              target: analyze-patterns
+          max_rework_attempts: 3
+      - publish-to-wiki
+      - coverage-report
+    post_success:
+      commit:
+        message: "chore(runbooks): generate runbooks from incident analysis [auto]"
+        include_paths:
+          - output/
+          - data/
+
+  - id: runbook-refresh
+    name: "Runbook Refresh (Scheduled)"
+    description: "Lightweight weekly refresh — fetch new incidents and update existing runbooks if patterns changed"
+    phases:
+      - fetch-incidents
+      - analyze-patterns
+      - prioritize-runbooks:
+          on_verdict:
+            insufficient-data:
+              target: fetch-incidents
+          max_rework_attempts: 1
+      - write-runbooks
+      - review-runbooks:
+          on_verdict:
+            rework:
+              target: write-runbooks
+          max_rework_attempts: 2
+      - publish-to-wiki
+      - coverage-report
+    post_success:
+      commit:
+        message: "chore(runbooks): weekly runbook refresh [auto]"
+        include_paths:
+          - output/
+          - data/

@@ -1,0 +1,6 @@
+schedules:
+  - id: weekly-runbook-refresh
+    cron: "0 9 * * 1"
+    workflow_ref: runbook-refresh
+    enabled: true
+    description: "Every Monday at 9 AM — fetch new incidents and refresh runbooks"
